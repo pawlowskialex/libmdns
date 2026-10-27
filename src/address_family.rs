@@ -1,5 +1,7 @@
 use super::MDNS_PORT;
 use if_addrs::{get_if_addrs, IfAddr};
+#[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
+use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashSet;
 use std::io;
@@ -29,8 +31,12 @@ pub trait AddressFamily {
         socket.set_reuse_address(true)?;
         socket.set_nonblocking(true)?;
 
+        // Linux before 3.9 has no SO_REUSEPORT (ENOPROTOOPT). SO_REUSEADDR alone lets several
+        // responders share the port there, so carry on: if the port can't be shared, bind fails.
         #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
-        socket.set_reuse_port(true)?;
+        if let Err(err) = socket.set_reuse_port(true) {
+            debug!("SO_REUSEPORT not available ({err}), relying on SO_REUSEADDR");
+        }
 
         socket.bind(&addr)?;
         Self::join_multicast(&socket, &Self::MDNS_GROUP)?;
@@ -126,4 +132,19 @@ fn get_one_nonloopback_ipv4_addr_per_iface() -> io::Result<Vec<Ipv4Addr>> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AddressFamily, Inet};
+
+    #[test]
+    fn responders_share_the_port() {
+        let first = Inet::bind().expect("first bind");
+        let second = Inet::bind().expect("second bind on the same port");
+        assert_eq!(
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port()
+        );
+    }
 }
